@@ -1,1 +1,3 @@
-pip install pandas openpyxl pydrive2
+streamlit
+pandas
+openpyxl
