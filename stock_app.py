@@ -1,75 +1,88 @@
 import streamlit as st
 import pandas as pd
-import io
+from pydrive2.auth import GoogleAuth
+from pydrive2.drive import GoogleDrive
+import os
 
-st.set_page_config(page_title="📦 Stock Manager", layout="centered")
-st.title("📦 Stock Management App")
+# Authenticate and create PyDrive client
+@st.cache_resource
+def connect_to_drive():
+    gauth = GoogleAuth()
+    gauth.LoadCredentialsFile("token.json")
 
-# Load the Excel file (must be in the same repo)
-try:
-    df = pd.read_excel("base_stock.xlsx")
-except FileNotFoundError:
-    st.error("❌ base_stock.xlsx file not found.")
-    st.stop()
+    if gauth.credentials is None:
+        gauth.LocalWebserverAuth()  # Launch browser for login
+    elif gauth.access_token_expired:
+        gauth.Refresh()
+    else:
+        gauth.Authorize()
 
-df.columns = [col.strip() for col in df.columns]
+    gauth.SaveCredentialsFile("token.json")
+    drive = GoogleDrive(gauth)
+    return drive
 
-st.subheader("📊 Current Stock")
+drive = connect_to_drive()
+
+# Google Drive file ID of base_stock.xlsx
+FILE_ID = "your-google-drive-file-id"
+
+# Download file from Drive
+downloaded = drive.CreateFile({'id': FILE_ID})
+downloaded.GetContentFile("base_stock.xlsx")
+
+# Load DataFrame
+df = pd.read_excel("base_stock.xlsx")
+st.title("📦 Stock Dashboard (Google Drive)")
 st.dataframe(df)
 
-# --- Stock Update Form ---
-st.subheader("🔄 Update Stock")
-product_code = st.text_input("Enter Product Code (optional)").strip().upper()
-product_name = st.text_input("Or Enter Product Name").strip()
-supplier = st.text_input("Enter Supplier").strip()
+# Inputs
+st.subheader("Update Stock")
+product_code = st.text_input("Product Code").strip().upper()
+product_name = st.text_input("Product Name").strip()
+supplier = st.text_input("Supplier").strip()
 quantity = st.number_input("Quantity", min_value=1, step=1)
 action = st.selectbox("Action", ["Add", "Remove"])
-submitted = st.button("Update Stock")
+submit = st.button("Apply")
 
-if submitted:
-    row = None
+if submit:
+    match_index = None
+    for i, row in df.iterrows():
+        if product_code and row["Product Code"].strip().upper() == product_code:
+            match_index = i
+            break
+        elif (not product_code and
+              row["Product Name"].strip().lower() == product_name.lower() and
+              row["Supplier"].strip().lower() == supplier.lower()):
+            match_index = i
+            break
 
-    if product_code:
-        match = df[df['Product Code'].astype(str).str.upper() == product_code]
-        if not match.empty:
-            row = match.index[0]
-
-    if row is None and product_name and supplier:
-        match = df[(df['Product Name'].str.lower() == product_name.lower()) &
-                   (df['Supplier'].str.lower() == supplier.lower())]
-        if not match.empty:
-            row = match.index[0]
-
-    if row is None:
-        st.warning("Product not found. Adding as new entry.")
-        new_row = {
-            'Product Name': product_name,
-            'Product Code': product_code if product_code else "",
-            'Supplier': supplier,
-            'Quantity': quantity if action == 'Add' else -quantity
-        }
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-    else:
-        if action == 'Add':
-            df.at[row, 'Quantity'] += quantity
-            st.success(f"✅ Added {quantity} units.")
+    if match_index is not None:
+        current_qty = df.at[match_index, "Quantity"]
+        new_qty = current_qty + quantity if action == "Add" else current_qty - quantity
+        if new_qty < 0:
+            st.error("Not enough stock.")
         else:
-            if df.at[row, 'Quantity'] >= quantity:
-                df.at[row, 'Quantity'] -= quantity
-                st.success(f"✅ Removed {quantity} units.")
-            else:
-                st.error("❌ Not enough stock to remove that quantity.")
+            df.at[match_index, "Quantity"] = new_qty
+            st.success("Stock updated.")
+    else:
+        if action == "Remove":
+            st.error("Product not found.")
+        else:
+            new_row = {
+                "Product Name": product_name,
+                "Product Code": product_code,
+                "Supplier": supplier,
+                "Quantity": quantity
+            }
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            st.success("New product added.")
 
-    # Display updated table
-    st.subheader("📈 Updated Stock")
-    st.dataframe(df)
+    # Save changes to Excel
+    df.to_excel("base_stock.xlsx", index=False)
 
-    # Download button
-    buffer = io.BytesIO()
-    df.to_excel(buffer, index=False, engine='openpyxl')
-    st.download_button(
-        label="📥 Download Updated Excel",
-        data=buffer.getvalue(),
-        file_name="updated_stock.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    # Upload updated file to Drive
+    uploaded = drive.CreateFile({'id': FILE_ID})
+    uploaded.SetContentFile("base_stock.xlsx")
+    uploaded.Upload()
+    st.success("Changes saved to Google Drive.")
+    st.experimental_rerun()
